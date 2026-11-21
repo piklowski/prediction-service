@@ -1,10 +1,10 @@
 const ort = require("onnxruntime-node");
 const path = require("path");
 const fs = require("fs");
+const Prediction = require("../models/prediction"); // 1. Importar el modelo
 
 // Rutas de los archivos del modelo
 const modelPath = path.join(__dirname, "../../modelo/modelo.onnx");
-
 const normPath = path.join(__dirname, "../../modelo/normalizacion.json");
 
 // Cargar parámetros de normalización
@@ -18,13 +18,29 @@ async function initModel() {
     console.log("Modelo ONNX cargado correctamente");
 }
 
+// Comprobar si el modelo está listo
+function isReady() {
+    if (session) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 // Obtener nombres de las características
 function getFeatures() {
     return norm.features;
 }
 
-// Realizar predicción
-async function predict(features) {
+// Realizar predicción y guardar en MongoDB
+async function predict(features, meta) {
+    // Comprobar que el modelo está cargado
+    if (!session) {
+        const error = new Error("Model is not ready");
+        error.status = 503;
+        throw error;
+    }
+
     // Validar entrada
     if (
         !Array.isArray(features) ||
@@ -34,7 +50,6 @@ async function predict(features) {
         const error = new Error(
             `Se esperan ${norm.mean.length} valores numéricos`,
         );
-
         error.status = 400;
         throw error;
     }
@@ -59,20 +74,45 @@ async function predict(features) {
     });
 
     // Calcular latencia
-    // Calcular latencia
     const latencyMs = Number((performance.now() - inicio).toFixed(2));
+    const prediction = Number(resultado[session.outputNames[0]].data[0]);
 
-    const prediction = resultado[session.outputNames[0]].data[0];
+    // Preparar metadatos básicos por si vienen vacíos
+    let dataId = null;
+    let source = "unknown";
+    if (meta) {
+        if (meta.dataId) {
+            dataId = meta.dataId;
+        }
+        if (meta.source) {
+            source = meta.source;
+        }
+    }
 
-    // Devolver los valores
-    return {
+    // 2. Crear y guardar el documento en MongoDB
+    const nuevaPrediccion = new Prediction({
+        dataId: dataId,
+        features: features,
         prediction: prediction,
-        latencyMs,
+        featureCount: features.length,
+        source: source,
+        latencyMs: latencyMs,
+    });
+
+    const prediccionGuardada = await nuevaPrediccion.save();
+
+    // 3. Devolver los valores que exige el contrato
+    return {
+        predictionId: prediccionGuardada._id,
+        prediction: prediction,
+        timestamp: prediccionGuardada.createdAt.toISOString(),
+        latencyMs: latencyMs,
     };
 }
 
 module.exports = {
     initModel,
+    isReady,
     getFeatures,
     predict,
 };
